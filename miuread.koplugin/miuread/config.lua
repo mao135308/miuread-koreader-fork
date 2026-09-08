@@ -1,7 +1,7 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.8.0-beta.10",
-    SCHEMA = 129,
+    VERSION = "5.8.0-beta.20",
+    SCHEMA = 135,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
     DATA_DIR = "miuread",
@@ -38,6 +38,31 @@ local C = {
         "https://gh-proxy.com/",
         "https://ghproxy.net/",
     },
+
+    -- beta.15 extension packages keep GitHub Releases as the source of truth, but
+    -- large bytes may travel through a faster domestic route. The GitHub Chinese
+    -- community mirror is the preferred download route; every route is still
+    -- checked against the official asset size / digest before installation.
+    EXTENSION_DOWNLOAD_ROUTES = {
+        { key = "git_zh", label = "GitHub 中文社区", mode = "replace_host", base = "https://mirrors.git-zh.com", preferred = true },
+        { key = "direct", label = "GitHub 官方", mode = "direct" },
+        { key = "ghfast", label = "ghfast", mode = "prefix", base = "https://ghfast.top/" },
+        { key = "gh_proxy", label = "gh-proxy", mode = "prefix", base = "https://gh-proxy.com/" },
+        { key = "ghproxy", label = "ghproxy.net", mode = "prefix", base = "https://ghproxy.net/" },
+    },
+    EXTENSION_LARGE_FILE_BYTES = 5 * 1024 * 1024,
+    EXTENSION_RESUME_BYTES = 512 * 1024,
+    EXTENSION_CONNECT_TIMEOUT_SECONDS = 20,
+    EXTENSION_STALL_SECONDS = 90,
+    EXTENSION_PROBE_BYTES = 128 * 1024,
+    -- Large-package route probing is deliberately bounded. Probe only the
+    -- three most useful routes (GitHub 中文社区 / GitHub 官方 / ghfast) so
+    -- testing a slow proxy never adds a minute before a real transfer starts.
+    EXTENSION_PROBE_MAX_ROUTES = 3,
+    EXTENSION_PROBE_CONNECT_TIMEOUT_SECONDS = 4,
+    EXTENSION_PROBE_MAX_SECONDS = 5,
+    EXTENSION_RETRY_BASE_SECONDS = 10,
+    EXTENSION_RETRY_MAX_SECONDS = 60,
 
     AUTO_UPDATE_INTERVAL = 24 * 60 * 60,
     AUTO_UPDATE_RETRY_INTERVAL = 6 * 60 * 60,
@@ -84,6 +109,22 @@ local C = {
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
+    -- beta.13: progress writes have priority over periodic reading-time writes.
+    -- The fence is a soft preemption: an already-dispatched time request is
+    -- allowed to return, but no new time request may start while progress waits.
+    PROGRESS_WRITER_SOFT_NOTICE_SECONDS = 2,
+    -- A progress write may wait briefly for an already-dispatched reading-time
+    -- request, but never holds Reader close/suspend for a network timeout. The
+    -- exact position is already durable and remains pending if this fence expires.
+    PROGRESS_WRITER_MAX_WAIT_SECONDS = 8,
+    -- v28 service health. Idle heartbeat is cheap /tmp state only. Reporting is
+    -- allowed a longer window because its HTTP dispatch may legitimately block.
+    READ_REPORT_HEARTBEAT_SECONDS = 5,
+    READ_REPORT_HEARTBEAT_STALE_SECONDS = 25,
+    READ_REPORT_REPORTING_STALE_SECONDS = 120,
+    READ_REPORT_HEARTBEAT_STARTUP_GRACE_SECONDS = 20,
+    READ_REPORT_HEALTH_RESTART_DELAY_SECONDS = 1.2,
+    READ_REPORT_MAX_HEALTH_RESTARTS = 2,
     IDLE_TIMEOUT = 600,
     REMOTE_THRESHOLD = 2,
 
@@ -258,6 +299,11 @@ local C = {
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
     HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- Ref #91: do not fork a fresh book-download worker when the device is
+    -- already at the low-memory boundary observed on KPW6. Resume remains a
+    -- little more permissive because a checkpointed worker has already paid
+    -- most of its setup cost.
+    HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
 
     -- beta.4 coalesces repeated typography taps into one KOReader reflow. On a
     -- low-memory/heavy-download overlap, let the downloader checkpoint first

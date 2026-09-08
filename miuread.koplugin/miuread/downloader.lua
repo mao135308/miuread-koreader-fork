@@ -985,7 +985,7 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         partial_range=partial_range,range_start_index=tonumber(opt.range_start_index),
         range_end_index=tonumber(opt.range_end_index),range_start_title=opt.range_start_title,
         range_end_title=opt.range_end_title,content_type="book",
-        sync_enabled=true,progress_sync_enabled=true,read_report_enabled=not partial_range,
+        sync_enabled=true,progress_sync_enabled=true,read_report_enabled=true,
         chapters=map,generated_at=now,complete=true,task_id=opt.download_run_id,
         progress_source_complete=opt.progress_source_complete==true,
         progress_source_chapter_count=tonumber(opt.progress_source_chapter_count) or 0,
@@ -1076,7 +1076,7 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
         content_type="book",
         sync_enabled=true,
         progress_sync_enabled=true,
-        read_report_enabled=not partial_range,
+        read_report_enabled=true,
         partial_range=partial_range,range_start_index=tonumber(opt.range_start_index),
         range_end_index=tonumber(opt.range_end_index),range_start_title=opt.range_start_title,
         range_end_title=opt.range_end_title,
@@ -1146,7 +1146,11 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             book_version=tonumber(book.version or session.book_version
                 or (type(session.book)=="table" and
                     (session.book.version or session.book.bookVersion or session.book.book_version))),
-            reader_url=session.url, chapters=map, context_updated_at=os.time(),
+            -- The canonical chapter catalog is already persisted once in
+            -- library[bookId].catalog above. Duplicating the full map in
+            -- sessions caused #91's settings file to grow past Lua's parser
+            -- nesting limit on long books.
+            reader_url=session.url, context_updated_at=os.time(),
             app_id=Protocol.app_id(Protocol.USER_AGENT),
         })
     end

@@ -123,6 +123,8 @@ local function public_result(result)
         response_summary = result.response_summary,
         attempts = result.attempts,
         payload_public = result.payload_public,
+        request_dispatched = result.request_dispatched == true
+            or (type(result.meta)=="table" and result.meta.request_dispatched==true),
         meta = result.meta,
     }
 end
@@ -134,6 +136,7 @@ function Service.run(job)
     local status_path = assert(job.status_path, "missing status path")
     local context_path = assert(job.context_path, "missing context path")
     local stop_path = assert(job.stop_path, "missing stop path")
+    local heartbeat_path = tostring(job.heartbeat_path or "")
     local owner_path = job.owner_path
     local lock_path = job.lock_path
     local reader_busy_path = tostring(job.reader_busy_path or "")
@@ -141,6 +144,19 @@ function Service.run(job)
     local poll_interval = math.max(0.5, tonumber(job.poll_interval) or 1)
 
     lower_priority()
+
+    local heartbeat_interval=math.max(2,tonumber(Config.READ_REPORT_HEARTBEAT_SECONDS) or 5)
+    local last_heartbeat=0
+    local function heartbeat(force)
+        if heartbeat_path=="" then return false end
+        local now=os.time()
+        if force==true or now-last_heartbeat>=heartbeat_interval then
+            last_heartbeat=now
+            return U.atomic_write(heartbeat_path,tostring(now),true)
+        end
+        return true
+    end
+    heartbeat(true)
 
     local generation = 0
     local sequence = 0
@@ -174,6 +190,12 @@ function Service.run(job)
         if value.book_id==nil then value.book_id=tostring(source_job.book_id or "") end
         if value.core_map_hash==nil then value.core_map_hash=tostring(source_job.core_map_hash or "") end
         if value.record_generation==nil then value.record_generation=tonumber(source_job.record_generation or 0) or 0 end
+        -- Every status transition carries the current provably-unsent time so a
+        -- progress fence or lifecycle status update cannot accidentally erase it
+        -- from the parent session.
+        if value.carry_remaining==nil then value.carry_remaining=math.max(0,tonumber(carry_remaining) or 0) end
+        if value.pending_elapsed==nil then value.pending_elapsed=value.carry_remaining end
+        if value.safe_pending==nil then value.safe_pending=(tonumber(value.pending_elapsed) or 0)>0 end
         return write_status(status_path,value)
     end
 
@@ -219,15 +241,18 @@ function Service.run(job)
             consecutive_failures=consecutive_failures+1
             return 0
         end
-        -- beta.24: never turn suspended/failed history into a later burst. Every
-        -- request contains only the fresh interval that led to this attempt and
-        -- is capped independently, even if an older service job still contains
-        -- a legacy carry value after OTA.
+        -- beta.13 only carries intervals that are PROVABLY unsent. A previous
+        -- request that reached report_read is never replayed, even when its
+        -- response was lost. This preserves genuine reading time without the
+        -- double-counting risk of replaying an uncertain HTTP write.
         local maximum=math.max(10,tonumber(Config.READ_REPORT_MAX_ELAPSED_SECONDS) or 60)
-        local base_elapsed=math.max(1,math.min(interval,maximum,math.floor(tonumber(elapsed) or interval)))
-        local carry_used=0
-        elapsed=base_elapsed
-        carry_remaining=0
+        local fresh_elapsed=math.max(1,math.floor(tonumber(elapsed) or interval))
+        local safe_carry=math.max(0,math.floor(tonumber(carry_remaining) or 0))
+        local available_elapsed=safe_carry+fresh_elapsed
+        local report_elapsed=math.max(1,math.min(maximum,available_elapsed))
+        local carry_used=math.min(safe_carry,report_elapsed)
+        local leftover=math.max(0,available_elapsed-report_elapsed)
+        elapsed=report_elapsed
         sequence = sequence + 1
         local report_book=U.copy(book or {})
         report_book.book_id=tostring(current_job.book_id or "")
@@ -270,6 +295,7 @@ function Service.run(job)
             force_context = consecutive_unconfirmed >= 2,
         }
         local attempted_at = os.time()
+        heartbeat(true)
         write_service_status({
             generation=generation,seq=sequence,state="reporting",accepted=nil,
             attempted_at=attempted_at,elapsed_seconds=elapsed,final_flush=final_flush==true,
@@ -277,6 +303,7 @@ function Service.run(job)
             writer_barrier_seq=tonumber(control.writer_barrier_seq or 0) or 0,
         })
         local ok, result = pcall(Adapter.run, report_job)
+        heartbeat(true)
         local completed_at = os.time()
         -- The elapsed segment ends when the request is dispatched, not when
         -- the HTTP response returns. Reading continues while the request is in
@@ -284,6 +311,18 @@ function Service.run(job)
         last_report_at = attempted_at
 
         if ok and type(result) == "table" then
+            local request_dispatched=result.request_dispatched==true
+                or (type(result.meta)=="table" and result.meta.request_dispatched==true)
+            if request_dispatched then
+                -- The attempted seconds may already be counted by WeRead. Only
+                -- the portion that was not included in this capped request is
+                -- safe to carry forward.
+                carry_remaining=leftover
+            else
+                -- Failure happened before /web/book/read was entered. The full
+                -- interval is definitely unsent and can be retried later.
+                carry_remaining=available_elapsed
+            end
             -- A candidate context only becomes authoritative after WeRead
             -- accepts this exact book/core-map request.
             if result.accepted and not time_only and type(result.legacy_context) == "table"
@@ -297,6 +336,8 @@ function Service.run(job)
             if result.wr_wrpa_changed then auth.wr_wrpa = result.wr_wrpa or "" end
 
             local out = public_result(result)
+            out.request_dispatched=request_dispatched
+            out.safe_pending=carry_remaining>0
             out.time_only=time_only
             out.report_mode=report_mode
             out.writer_barrier_seq=tonumber(control.writer_barrier_seq or 0) or 0
@@ -361,6 +402,10 @@ function Service.run(job)
             return out.next_due
         end
 
+        -- Adapter itself failed after invocation. Dispatch state is unknowable;
+        -- conservatively treat the attempted portion as dispatched so it is not
+        -- replayed. Only the capped overflow was never attempted.
+        carry_remaining=leftover
         consecutive_failures = consecutive_failures + 1
         consecutive_unconfirmed = 0
         local kind=classify_error(nil,result)
@@ -384,6 +429,9 @@ function Service.run(job)
             carry_consumed_seconds = carry_used,
             carry_remaining = carry_remaining,
             pending_elapsed = carry_remaining,
+            safe_pending = carry_remaining > 0,
+            request_dispatched = true,
+            dispatch_state_uncertain = true,
             recovery_probe = false,
             final_flush = final_flush == true,
             flush_reason = reason,
@@ -397,6 +445,7 @@ function Service.run(job)
         return due
     end
 
+    heartbeat(true)
     write_service_status({
         generation = 0,
         seq = 0,
@@ -406,6 +455,7 @@ function Service.run(job)
     })
 
     while true do
+        heartbeat(false)
         if U.file_exists(stop_path) or not parent_alive(parent_pid) then break end
 
         local control = read_json(control_path)
@@ -425,6 +475,7 @@ function Service.run(job)
                 local previous_job=current_job
                 local previous_next_due=next_due
                 local previous_last_report_at=last_report_at
+                local previous_carry=math.max(0,math.floor(tonumber(carry_remaining) or 0))
                 local preserve_clock=previous_job~=nil
                     and tostring(loaded.action or "")~="reset_auth"
                     and tostring(loaded.reading_time_session_id or "")~=""
@@ -458,7 +509,8 @@ function Service.run(job)
                     local interval = math.max(10, tonumber(loaded.interval) or tonumber(Config.READ_INTERVAL) or 60)
                     local first_delay = math.max(5, math.min(interval, tonumber(loaded.first_delay) or interval))
                     local now = os.time()
-                    carry_remaining=0
+                    local loaded_carry=math.max(0,math.floor(tonumber(loaded.carry_elapsed) or 0))
+                    carry_remaining=preserve_clock and math.max(previous_carry,loaded_carry) or loaded_carry
                     if preserve_clock then
                         -- Authentication/session metadata can refresh while the
                         -- same reading segment is active. Replace credentials,
@@ -482,9 +534,11 @@ function Service.run(job)
                         clock_preserved = preserve_clock or nil,
                         reading_time_session_id=tostring(loaded.reading_time_session_id or ""),
                         reading_time_segment_id=tostring(loaded.reading_time_segment_id or ""),
-                        carry_elapsed = 0,
+                        carry_elapsed = carry_remaining,
                         carry_consumed = false,
                         carry_remaining = carry_remaining,
+                        pending_elapsed = carry_remaining,
+                        safe_pending = carry_remaining > 0,
                         service_version = tonumber(job.service_version) or 0,
                     })
                 end
@@ -554,7 +608,7 @@ function Service.run(job)
                     elapsed=tonumber(control.flush_elapsed) or math.max(0,now-last_report_at)
                 end
                 elapsed=math.floor(math.max(0,elapsed))
-                if elapsed >= MIN_FINAL_SECONDS then
+                if elapsed + math.max(0,tonumber(carry_remaining) or 0) >= MIN_FINAL_SECONDS then
                     next_due = run_report(control, elapsed, true, tostring(control.flush_reason or "stop"))
                 else
                     next_due = 0
@@ -567,6 +621,8 @@ function Service.run(job)
                         flush_skipped = true,
                         flush_reason = tostring(control.flush_reason or "stop"),
                         elapsed_seconds = elapsed,
+                        pending_elapsed = carry_remaining,
+                        safe_pending = carry_remaining > 0,
                         book_id = tostring(current_job.book_id or ""),
                         writer_barrier_seq=tonumber(control.writer_barrier_seq or 0) or 0,
                         writer_barrier_reason=tostring(control.writer_barrier_reason or ""),
@@ -598,6 +654,7 @@ function Service.run(job)
         sleep(poll_interval)
     end
 
+    heartbeat(true)
     write_service_status({
         generation = generation,
         seq = sequence,
@@ -609,6 +666,7 @@ function Service.run(job)
         local owner = read_json(owner_path)
         if not owner or tonumber(owner.pid) == own_pid() then os.remove(owner_path) end
     end
+    if heartbeat_path~="" then os.remove(heartbeat_path) end
     remove_lock_dir(lock_path)
     return true
 end

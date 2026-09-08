@@ -1,34 +1,29 @@
-# 5.8.0-beta.10 verification
+# 5.8.0-beta.20 verification
 
-Scope: Package Manager v3 / extension download transport refactor. The book download, sync, and OTA cores are intentionally kept unchanged from 5.8.0-beta.9.
+## 完成标准
 
-Build/static checks completed in the build environment:
+- Issue #105：旧状态 `shelf_filter.enabled=true` 且未选择任何分组时必须显示完整微信书架。
+- 权威分组快照确认原选择已经不存在时，自动恢复全部书籍并给出一次恢复提示。
+- 一个真实存在、明确选中的空分组仍允许显示 0 本；真正微信书架为 0 本时也必须保持 0 本。
+- 分组响应不完整时保留现有有效缓存，不把“不知道有没有分组”误判成“没有分组”。
+- Schema 135 能从已有 `raw_books > 0 / books = 0` 缓存离线恢复书架。
+- 取消最后一个分组或“清空选择”后立即回到全部微信书架。
+- 只有新鲜、权威的分组响应明确 `groups=0` 且 `raw_books>=100` 时才产生建立分组建议。
+- 100 本提醒不改变书架内容；99 本不提醒；已有任意微信分组时不提醒。
+- 提醒按账号独立；“知道了”结束当前无分组阶段，“不再提醒”永久关闭该账号提醒；提示只在主页空闲且没有其他模态界面时出现。
+- 日志记录 raw/groups/selected/mode/effective/reason。
+- beta.19 的阅读时长、精确进度、SAFE pending、sources 清理、主页按需加载、后台下载、休眠与退出收尾全部保持。
 
-- Version identity: `_meta.lua` and `miuread/config.lua` are both `5.8.0-beta.10`; schema is 129 and the 128→129 migration is present.
-- Package Manager v3 implementation assertions: **67/67 passed**. Coverage includes deterministic curated packages, community fallback behavior, KOReader HTTP fast path, curl recovery, persistent task ownership, task-local storage, non-destructive partial handling, route limits/speed history, network wait states, download-center integration, Kindle lifecycle hooks, verification, install rollback, and package metadata recording.
-- Curated deterministic package assertions cover **Pinyin IME v1.2.0**, **fanqie v2.2.1**, **Z-Library v1.0.49**, and **墨痕壁纸 v3.5.7**, including exact Release URL/size/SHA-256 metadata.
-- Dynamic route tests passed: automatic mode starts with direct when no history exists, uses at most three routes, respects a faster successful historical route, manual direct/mirror modes use exactly the selected route, and non-GitHub packages do not enter GitHub mirror routing.
-- Dynamic verifier tests passed: a valid size/SHA ZIP is accepted; deliberate size mismatch is rejected as `size`; deliberate SHA mismatch is rejected as `sha256`.
-- Lua syntax: **138/138** plugin Lua files pass `texluac -p`.
-- Critical-core regression guard: `miuread/downloader.lua`, `download_task.lua`, `download_database.lua`, `download_plan.lua`, `download_result.lua`, `sync.lua`, and `updater.lua` are SHA-identical to 5.8.0-beta.9.
-- Release/package preflight: **25/25 passed**. Required plugin files are present; every ZIP entry is under `miuread.koplugin/`; forbidden `.md`/`.epub`/`.log` and runtime-settings files are absent; AGPL identity, beta channel, manifest route, changelog section, manifest size/SHA, and summary bounds all pass.
-- Deterministic build reproduction: rebuilding the full install package with the release workflow algorithm produced a byte-for-byte identical ZIP.
-- Full install ZIP integrity: `ZipFile.testzip()` / `unzip -t` passed with no compressed-data errors.
+## 自动验证
 
-Final install package:
+- `python3 tools/verify_beta20.py`
+- `texlua tools/test_shelf_group_recovery.lua`
+- `texlua tools/test_readtime_recovery.lua`
+- `texlua tools/test_store_repair.lua`
+- `texlua tools/test_store_shared.lua`
+- `texlua tools/test_extension_catalog.lua`
+- `texlua tools/test_extension_download.lua`
+- `texlua tools/test_extension_install.lua`
+- `texlua tools/test_digest_stream.lua`
 
-- File: `miuread-v5.8.0-beta.10-full.zip`
-- Size: **1,916,755 bytes**
-- SHA-256: `f49a9880a29647d7591ea195fccc9a8eb456bac69858a68bf5f7fb378135c5b3`
-- Channel: `beta`
-
-Not statically provable and therefore still requires real-device validation on Kindle/Kobo/Android as applicable:
-
-- Actual throughput versus 5.8.0-beta.4 on the same network.
-- Pinyin IME 63,312,207-byte full transfer and final upstream SHA-256 on Kindle.
-- 墨痕壁纸 9,983,676-byte deterministic Release transfer on the device that previously showed repeated download failures.
-- Screen-off background transfer, forced REAL_SUSPEND fallback, wake/Wi-Fi reconnection, and resume without progress reset.
-- No orphan curl/worker after a real KOReader restart/exit.
-- E-ink progress refresh cadence, touch behavior, and perceived download-center responsiveness.
-
-Static/build verification is complete; it does not substitute for the real-device tests above.
+Release ZIP 必须只有一个 `miuread.koplugin/` 根目录，插件版本必须为 `5.8.0-beta.20`，Schema 必须为 135。
