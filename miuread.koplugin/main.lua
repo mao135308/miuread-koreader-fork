@@ -3425,7 +3425,7 @@ function Plugin:_save_home_preferences_deferred(home,preferences,delay)
     preferences=preferences or self.store:preferences()
     preferences.home_ui=home
     if self.store.save_preferences_deferred then
-        self.store:save_preferences_deferred(preferences)
+        self.store:save_preferences_deferred(preferences,delay==false)
     else
         return self:_save_home_preferences(home,preferences)
     end
@@ -11943,15 +11943,17 @@ function Plugin:_home_full_refresh(confirmed)
         UIManager:show(dialog)
         return true
     end
-    local listener=self:_koreader_device_listener()
+    -- Home callbacks may still belong to the closed Reader plugin. Its device
+    -- listener updates ReaderFooter before repainting, which needs a document.
+    local reader=self:_active_reader_ui()
+    local listener=reader and reader.document and reader.devicelistener
     if listener and type(listener.onFullRefresh)=="function" then
         local ok,err=pcall(listener.onFullRefresh,listener)
         if ok then return true end
         logger.warn("[MiuRead][Refresh] native full refresh failed",tostring(err))
     end
-    -- Compatibility fallback for KOReader builds where the active UI listener
-    -- is temporarily unavailable during a desktop transition.
-    UIManager:broadcastEvent(Event:new("FullRefresh"))
+    -- This is the native full-refresh operation without the Reader-only footer.
+    UIManager:setDirty(nil,"full")
     return true
 end
 
@@ -17550,6 +17552,11 @@ function Plugin:_request_reader_close(generation,source)
     if local_session then
         logger.info("[MiuRead][ReaderClose] local close command returned",
             "generation=",tostring(generation))
+    end
+    -- onClose has returned after saving/releasing the document. Restore the
+    -- parked Home before due background callbacks can block its next UI tick.
+    if self:_reader_lifecycle_state()=="closed" and HomeView.is_shown() then
+        return self:_finish_reader_return(generation,"reader close completed")
     end
     self:_schedule_reader_return_finish(generation,.10,"close requested")
     return true

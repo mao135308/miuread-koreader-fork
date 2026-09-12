@@ -1,5 +1,7 @@
 local function read(path) local f=assert(io.open(path));local s=f:read('*a');f:close();return s end
 local source=read(assert(arg[1]))
+assert(source:find('self.store:save_preferences_deferred(preferences,delay==false)',1,true),
+    'navigation must survive Store reloads from other plugin paths')
 assert(loadstring(source),'main.lua syntax')
 local function method(name)
     local a=assert(source:find('function Plugin:'..name..'(',1,true))
