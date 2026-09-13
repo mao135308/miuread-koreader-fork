@@ -312,13 +312,21 @@ local function settings_payload_valid(payload)
     local ok,value=pcall(loader)
     if not ok then return false,value end
     if type(value)~="table" then return false,"settings payload did not return a table" end
-    return true
+    return true,nil,value
 end
 
-local function settings_file_data(path)
+local function settings_file_data(path,validated)
     if not path or lfs.attributes(path,"mode")~="file" then return nil,"missing" end
     local size=U.file_size(path) or 0
     if size<=0 then return nil,"empty" end
+    if validated then
+        local file=io.open(path,"rb")
+        local payload=file and file:read("*a")
+        if file then file:close() end
+        -- Compare fresh bytes, not mtime/size: another process can replace a
+        -- same-sized settings file within the same clock tick.
+        if payload==validated.payload then return validated.data end
+    end
     local loader,err=loadfile(path)
     if not loader then return nil,err end
     local ok,value=pcall(loader)
@@ -2346,7 +2354,7 @@ function Store:flush(reason)
     local navigation=pending_home_navigation(self)
     local disk_data
     if not self.isolated then
-        disk_data=settings_file_data(self.settings_path)
+        disk_data=settings_file_data(self.settings_path,self._validated_settings)
         if type(disk_data)=="table" then
             self.db.data.sessions=merge_newer_progress_sessions(self.db.data.sessions,disk_data.sessions)
         end
@@ -2381,11 +2389,12 @@ function Store:flush(reason)
     -- table expression, while a settings file must be a chunk that returns it.
     -- Validate the complete chunk in memory, atomically replace the target, and
     -- keep the last valid generation if anything fails.
-    local payload
+    local payload,validated_data
     local function attempt_write()
         payload=settings_payload(self.db.data,self.settings_path)
-        local valid_payload,parse_error=settings_payload_valid(payload)
+        local valid_payload,parse_error,parsed=settings_payload_valid(payload)
         if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
+        validated_data=parsed
         local written,write_error=U.atomic_write(self.settings_path,payload,true)
         if not written then error("atomic settings write failed: "..tostring(write_error)) end
     end
@@ -2398,6 +2407,7 @@ function Store:flush(reason)
         ok,err=xpcall(attempt_write,debug.traceback)
     end
     if not ok then
+        self._validated_settings=nil
         logger.err("[MiuRead][Store] settings flush failed; keeping previous settings",tostring(err))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
@@ -2409,8 +2419,15 @@ function Store:flush(reason)
         return false,err
     end
 
-    local valid,validation_reason=settings_file_valid(self.settings_path)
+    -- The chunk was already parsed and executed before the atomic write.
+    -- Exact readback proves the installed bytes are that validated chunk.
+    local written_file=io.open(self.settings_path,"rb")
+    local written_payload=written_file and written_file:read("*a")
+    if written_file then written_file:close() end
+    local valid=written_payload==payload
+    local validation_reason="settings readback differs from validated payload"
     if not valid then
+        self._validated_settings=nil
         logger.warn("[MiuRead][Store] atomic settings flush produced invalid file","reason=",tostring(validation_reason))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
@@ -2428,6 +2445,7 @@ function Store:flush(reason)
         end
         os.remove(previous_path)
     end
+    self._validated_settings={payload=payload,data=validated_data}
     self._pending_home_navigation=nil
     logger.info("[MiuRead][StorePerf] full settings flush",
         "reason=",reason,
@@ -2449,7 +2467,7 @@ function Store:reload()
     return self
 end
 function Store:read_persisted(key)
-    local data,err=settings_file_data(self.settings_path)
+    local data,err=settings_file_data(self.settings_path,self._validated_settings)
     if not data then return nil,err end
     return U.copy(data[key])
 end

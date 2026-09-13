@@ -189,6 +189,22 @@ local function run()
     assert(progress_saved.pending_progress==false,
         'Home preference flush resurrected an already verified pending upload')
 
+    -- Exact-byte validation must see a same-sized external update even when
+    -- filesystem timestamps have not changed (the fixture always reports 1).
+    local external_bytes=read(path)
+    local advanced=external_bytes:gsub('(progress_verified_sequence"%]=)7','%18')
+        :gsub('(progress_latest_sequence"%]=)7','%18')
+    assert(#advanced==#external_bytes and advanced~=external_bytes)
+    assert(write(path,advanced))
+    assert(home:read_persisted('sessions')['book-progress'].progress_verified_sequence==8,
+        'persisted read hid a same-sized external progress update')
+    assert(home:flush())
+    assert(loadfile(path)().sessions['book-progress'].progress_verified_sequence==8)
+    local readback=home:read_persisted('sessions')
+    readback['book-progress'].progress_verified_sequence=99
+    assert(home:read_persisted('sessions')['book-progress'].progress_verified_sequence==8,
+        'returned persisted values mutated the validated snapshot')
+
     local before_writes=write_count
     assert(home:flush('duplicate_close'))
     assert(write_count==before_writes,'unchanged close rewrote settings/backups')
@@ -211,6 +227,17 @@ local function run()
     home.db.data.return_test=nil
     assert(home:flush())
     assert(loadfile(path)().return_test==nil,'deleted table remained on disk')
+    local native_write=require('miuread.util').atomic_write
+    require('miuread.util').atomic_write=function(target,payload,...)
+        if target==path then payload=payload:gsub('readback_probe"%]=1','readback_probe"%]=2') end
+        return native_write(target,payload,...)
+    end
+    home.db.data.readback_probe=1
+    assert(home:flush()==false,'valid Lua with altered written bytes was accepted')
+    require('miuread.util').atomic_write=native_write
+    home.db.data.readback_probe=1
+    assert(home:flush(),'save could not recover after altered readback')
+    assert(loadfile(path)().readback_probe==1)
     assert(write(path,'invalid settings chunk'))
     assert(home:flush(),'invalid disk must be repaired, not treated as unchanged')
     assert(loadfile(path)().preferences.home_ui.local_entry_root=='/mnt/us/Other')

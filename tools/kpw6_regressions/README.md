@@ -93,3 +93,32 @@ keys, booleans, aliases and native fallback. `reader_return_test.lua
 stale generations. This round passed all 17 device scripts, including live fork
 DNS, plus 292 static checks. Save benchmarks exclude UI/physical display time;
 end-to-end targets still require real interaction samples.
+
+## Post-close settings latency follow-up (2026-09-13)
+
+Home restoration took 1.3–2 seconds in the reported sessions, but repeated
+synchronous settings saves continued through the upload and readback callbacks.
+Each save of the 1.3 MB settings file took about 0.7–1.6 seconds in those logs.
+The previous Home-restored measurement did not cover input responsiveness.
+
+Store now retains one validated payload and its parsed snapshot. Persisted reads
+still read fresh file bytes and reuse the snapshot only on an exact match; mtime
+and size are never freshness proofs. Every changed save is fully parsed before
+the existing atomic write, then read back byte-for-byte against that payload.
+Save timing, progress merge rules, backups and navigation recovery are retained.
+
+`test_store_shared.lua` additionally checks same-sized external progress changes,
+returned-value isolation, altered-but-valid Lua readback rejection and recovery.
+All 17 device regression scripts and 292 static checks passed for this candidate.
+On a private copy of the actual settings, five baseline changed saves measured
+802–894 ms. Candidate warm saves measured 511–616 ms (first save 777 ms);
+unchanged saves measured 48–51 ms versus 127–244 ms. Full value round trips passed.
+The retained validated snapshot adds approximately 4.3 MB for this settings file.
+These isolated measurements are not end-to-end interaction acceptance. Device
+installation and user testing are complete. The user reports smoother operation,
+with slight stalls after repeated cycles, and selected this patch for the PR.
+Home restoration measured 1048–1219 ms, processed section
+switches 178–436 ms and Quick Panel samples 34–103 ms. These log durations exclude
+physical e-ink refresh and time queued before handlers run; they do not prove an
+upper bound for every tap. The latest stable release v5.7.5 has the same Store
+blob as the beta22 baseline, so this repeated parsing predates the PR.
