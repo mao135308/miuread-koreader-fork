@@ -2907,14 +2907,16 @@ function Store:flush(reason)
             "error=",tostring(validation_reason or "validation_failed"))
         return false,validation_reason
     end
+    local backed_up=false
     if not self.isolated then
-        local backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
+        local backup_error
+        backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
         if not backed_up then
             logger.warn("[MiuRead][Store] settings backup refresh failed",tostring(backup_error or "unknown"))
         end
         os.remove(previous_path)
     end
-    self._validated_settings={payload=payload,data=validated_data,entries=validated_entries}
+    self._validated_settings={payload=payload,data=validated_data,entries=validated_entries,backed_up=backed_up==true}
     self._pending_home_navigation=nil
     local elapsed_ms=math.floor((store_perf_clock()-flush_started)*1000+0.5)
     if elapsed_ms>=250 or reason=="set:auth" then
@@ -2973,7 +2975,13 @@ function Store:reload()
     restore_home_navigation(self,navigation)
     if not self.isolated then
         local valid=self:_read_settings_file()~=nil
-        if valid then U.copy_file(self.settings_path,self.settings_backup_path) end
+        local snapshot=self._validated_settings
+        -- The backup already holds these exact bytes when the flush that wrote
+        -- them refreshed it; copy only otherwise.
+        if valid and not (snapshot and snapshot.backed_up==true) then
+            local copied=U.copy_file(self.settings_path,self.settings_backup_path)
+            if copied and snapshot then snapshot.backed_up=true end
+        end
     end
     return self
 end

@@ -254,9 +254,11 @@ local function run()
     local file_parses=0
     loadfile=function(name,...) if name==path then file_parses=file_parses+1 end return real_loadfile(name,...) end
     parses=0; loadstring=function(chunk,name) if name=='@'..path then parses=parses+1 end return real_loadstring(chunk,name) end
+    local writes_before_reload=write_count
     store:reload()
     loadfile=real_loadfile; loadstring=real_loadstring
     assert(file_parses==0 and parses==0,'unchanged reload parsed the file again')
+    assert(write_count==writes_before_reload,'unchanged reload rewrote the backup')
     assert(store.db.data.library==library_table,'unchanged library table was replaced')
     assert(strict(store.db.data,assert(loadfile(path))()),'reload does not match the file exactly')
     data=store.db.data
