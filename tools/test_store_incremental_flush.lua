@@ -205,11 +205,38 @@ local function run()
     assert(store:flush('after write failure'))
     expect_file(path,data,'after write failure')
 
+    -- Bytes written by another process are parsed once, then reused by reads,
+    -- reload checks and the next flush; a further change is parsed again.
+    local real_loadstring=loadstring
+    local parses=0
+    loadstring=function(chunk,name)
+        if name=='@'..path then parses=parses+1 end
+        return real_loadstring(chunk,name)
+    end
+    local foreign=loadfile(path)(); foreign.preferences={home_ui={active_section='device'}}
+    assert(write(path,'return '..dump(foreign)))
+    assert(store:read_persisted('preferences').home_ui.active_section=='device')
+    assert(store:read_persisted('preferences').home_ui.active_section=='device')
+    store:reload()
+    data=store.db.data
+    assert(data.preferences.home_ui.active_section=='device','reload missed the external write')
+    assert(parses==1,'external settings parsed '..parses..' times')
+    foreign.preferences.home_ui.active_section='recent'
+    assert(write(path,'return '..dump(foreign)))
+    assert(store:read_persisted('preferences').home_ui.active_section=='recent','changed bytes reused a stale snapshot')
+    assert(parses==2,'changed settings were not parsed again')
+    local copy=store:read_persisted('preferences'); copy.home_ui.active_section='mutated'
+    assert(store:read_persisted('preferences').home_ui.active_section=='recent','read_persisted returned shared state')
+    loadstring=real_loadstring
+    store:reload(); data=store.db.data
+    assert(store:flush('after external write'))
+    expect_file(path,data,'after external write')
+
     -- Unchanged data still skips the write entirely.
     local writes=write_count
     assert(store:flush('unchanged'))
     assert(write_count==writes,'unchanged settings were written again')
-    print('incremental settings flush: reuse, change detection, random mutations, fallback, compaction and write failure: PASS')
+    print('incremental settings flush: reuse, change detection, random mutations, fallback, compaction, write failure and external reads: PASS')
 end
 
 local ok,err=xpcall(run,debug.traceback)

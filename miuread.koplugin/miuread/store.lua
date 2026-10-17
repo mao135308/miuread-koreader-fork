@@ -421,24 +421,26 @@ local function settings_payload_valid(payload)
     return true,nil,value
 end
 
+-- Returns the parsed settings and, when they were freshly parsed, the exact
+-- bytes they came from so a Store can reuse them for identical reads.
 local function settings_file_data(path,validated)
     if not path or lfs.attributes(path,"mode")~="file" then return nil,"missing" end
     local size=U.file_size(path) or 0
     if size<=0 then return nil,"empty" end
-    if validated then
-        local file=io.open(path,"rb")
-        local payload=file and file:read("*a")
-        if file then file:close() end
-        -- Compare fresh bytes, not mtime/size: another process can replace a
-        -- same-sized settings file within the same clock tick.
-        if payload==validated.payload then return validated.data end
-    end
-    local loader,err=loadfile(path)
+    local file,open_error=io.open(path,"rb")
+    if not file then return nil,open_error end
+    local payload=file:read("*a")
+    file:close()
+    if not payload then return nil,"settings file unreadable" end
+    -- Compare fresh bytes, not mtime/size: another process can replace a
+    -- same-sized settings file within the same clock tick.
+    if validated and payload==validated.payload then return validated.data end
+    local loader,err=loadstring(payload,"@"..path)
     if not loader then return nil,err end
     local ok,value=pcall(loader)
     if not ok then return nil,value end
     if type(value)~="table" then return nil,"settings file did not return a table" end
-    return value
+    return value,nil,payload
 end
 
 local function settings_file_valid(path)
@@ -2809,7 +2811,7 @@ function Store:flush(reason)
     local navigation=pending_home_navigation(self)
     local disk_data
     if not self.isolated then
-        disk_data=settings_file_data(self.settings_path,self._validated_settings)
+        disk_data=self:_read_settings_file()
         if type(disk_data)=="table" then
             self.db.data.sessions=merge_newer_progress_sessions(self.db.data.sessions,disk_data.sessions)
         end
@@ -2923,21 +2925,35 @@ function Store:flush(reason)
     end
     return true
 end
+-- Read the settings file, reusing the snapshot for bytes this Store already
+-- parsed or wrote. Freshly parsed bytes become that snapshot: until the file
+-- changes again, later reads (Home summaries, reload checks, the next flush)
+-- compare bytes instead of parsing the whole file each time.
+function Store:_read_settings_file()
+    local data,err,payload=settings_file_data(self.settings_path,self._validated_settings)
+    if payload then
+        local previous=self._validated_settings
+        self._validated_settings={payload=payload,data=data,entries=previous and previous.entries}
+    end
+    return data,err
+end
 function Store:reload()
     local navigation=pending_home_navigation(self)
-    if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
+    if not self.isolated and not self:_read_settings_file() then
+        restore_settings_file(self.settings_path,self.settings_backup_path)
+    end
     self.db = LuaSettings:open(self.settings_path)
     -- Reload fresh worker results without discarding deferred tab/page choices.
     -- Only navigation is overlaid; all other settings and library data reload.
     restore_home_navigation(self,navigation)
     if not self.isolated then
-        local valid=settings_file_valid(self.settings_path)
+        local valid=self:_read_settings_file()~=nil
         if valid then U.copy_file(self.settings_path,self.settings_backup_path) end
     end
     return self
 end
 function Store:read_persisted(key)
-    local data,err=settings_file_data(self.settings_path,self._validated_settings)
+    local data,err=self:_read_settings_file()
     if not data then return nil,err end
     return U.copy(data[key])
 end
