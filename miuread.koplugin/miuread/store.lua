@@ -2937,12 +2937,37 @@ function Store:_read_settings_file()
     end
     return data,err
 end
+local function same_value(a,b)
+    if a==b then return true end
+    if type(a)~="table" or type(b)~="table" then return false end
+    for key,value in pairs(a) do
+        if not same_value(value,b[key]) then return false end
+    end
+    for key in pairs(b) do
+        if a[key]==nil then return false end
+    end
+    return true
+end
 function Store:reload()
     local navigation=pending_home_navigation(self)
-    if not self.isolated and not self:_read_settings_file() then
+    local data=not self.isolated and self:_read_settings_file() or nil
+    if not self.isolated and not data then
         restore_settings_file(self.settings_path,self.settings_backup_path)
     end
-    self.db = LuaSettings:open(self.settings_path)
+    if data and data==(self._validated_settings and self._validated_settings.data) then
+        -- The file holds exactly the validated snapshot: make every top-level
+        -- value equal to it (strict, including number precision) instead of
+        -- parsing the same bytes again. Unchanged keys keep their tables.
+        local live=self.db.data
+        for key in pairs(live) do
+            if data[key]==nil then live[key]=nil end
+        end
+        for key,value in pairs(data) do
+            if not same_value(live[key],value) then live[key]=U.copy(value) end
+        end
+    else
+        self.db = LuaSettings:open(self.settings_path)
+    end
     -- Reload fresh worker results without discarding deferred tab/page choices.
     -- Only navigation is overlaid; all other settings and library data reload.
     restore_home_navigation(self,navigation)
@@ -2956,5 +2981,20 @@ function Store:read_persisted(key)
     local data,err=self:_read_settings_file()
     if not data then return nil,err end
     return U.copy(data[key])
+end
+-- Like read_persisted(), but repeated calls for unchanged file bytes return
+-- the same copy. For read-only callers; the validated snapshot is never shared.
+function Store:read_persisted_shared(key)
+    local data,err=self:_read_settings_file()
+    if not data then return nil,err end
+    local snapshot=self._validated_settings
+    if not (snapshot and snapshot.data==data) then return U.copy(data[key]) end
+    snapshot.shared_copies=snapshot.shared_copies or {}
+    local value=snapshot.shared_copies[key]
+    if value==nil then
+        value=U.copy(data[key])
+        snapshot.shared_copies[key]=value
+    end
+    return value
 end
 return Store

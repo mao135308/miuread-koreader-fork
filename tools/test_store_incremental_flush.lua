@@ -232,11 +232,51 @@ local function run()
     assert(store:flush('after external write'))
     expect_file(path,data,'after external write')
 
+    -- reload() of the bytes it already validated: no parse, memory becomes
+    -- exactly the file (strict numbers), deferred in-memory edits are dropped
+    -- as before, and unchanged top-level tables are kept.
+    local function strict(a,b)
+        if a==b then return true end
+        if type(a)~='table' or type(b)~='table' then return false end
+        for k,v in pairs(a) do if not strict(v,b[k]) then return false end end
+        for k in pairs(b) do if a[k]==nil then return false end end
+        return true
+    end
+    -- Memory keeps more digits than the file stores (tostring precision).
+    data.sessions['200'].percent=0.1234567890123456
+    assert(store:flush('before reload'))
+    data=store.db.data
+    assert(data.sessions['200'].percent~=assert(loadfile(path))().sessions['200'].percent,'precision case not set up')
+    local library_table=data.library
+    store:set_deferred('recent_reads',{items={{book_id='x'}}})
+    data.extra_reload_key={dropped=true}
+    local real_loadfile=loadfile
+    local file_parses=0
+    loadfile=function(name,...) if name==path then file_parses=file_parses+1 end return real_loadfile(name,...) end
+    parses=0; loadstring=function(chunk,name) if name=='@'..path then parses=parses+1 end return real_loadstring(chunk,name) end
+    store:reload()
+    loadfile=real_loadfile; loadstring=real_loadstring
+    assert(file_parses==0 and parses==0,'unchanged reload parsed the file again')
+    assert(store.db.data.library==library_table,'unchanged library table was replaced')
+    assert(strict(store.db.data,assert(loadfile(path))()),'reload does not match the file exactly')
+    data=store.db.data
+
+    -- Shared persisted copies: one copy per file state, never the snapshot.
+    local first=store:read_persisted_shared('library')
+    assert(first==store:read_persisted_shared('library'),'shared copy was rebuilt for unchanged bytes')
+    assert(first~=store._validated_settings.data.library,'validated snapshot was shared')
+    first.injected=true
+    assert(store:read_persisted('library').injected==nil,'shared copy leaked into persisted reads')
+    data.library['300']={book_id='300',title='new'}
+    assert(store:flush('library changed'))
+    local second=store:read_persisted_shared('library')
+    assert(second~=first and second['300'] and second['300'].title=='new','shared copy survived a file change')
+
     -- Unchanged data still skips the write entirely.
     local writes=write_count
     assert(store:flush('unchanged'))
     assert(write_count==writes,'unchanged settings were written again')
-    print('incremental settings flush: reuse, change detection, random mutations, fallback, compaction, write failure and external reads: PASS')
+    print('incremental settings flush: reuse, change detection, random mutations, fallback, compaction, write failure, external reads, reload and shared reads: PASS')
 end
 
 local ok,err=xpcall(run,debug.traceback)
