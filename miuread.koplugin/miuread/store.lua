@@ -2777,6 +2777,32 @@ local function settings_equal(a,b,seen)
     return true
 end
 
+-- Most settings bytes (library catalogs, shelf cache) do not change between
+-- progress saves. Reuse the validated text of each top-level key whose value
+-- still equals the snapshot parsed from that text; serialize and parse only
+-- changed keys. Entries are parsed inside a table constructor, at the same
+-- depth they have in the file, so the joined chunk is valid exactly when every
+-- entry is. Returns nil when compact serialization cannot represent the data,
+-- or nil plus the parse error when an entry is invalid.
+local function incremental_settings_payload(data,path,previous_entries)
+    local entries,parts,parsed={},{},{}
+    for key,value in pairs(data) do
+        local entry=previous_entries and previous_entries[key]
+        if not entry or not settings_equal(value,entry.value) then
+            local text=compact_settings({[key]=value})
+            if not text then return nil end
+            text=text:sub(2,-2)
+            local valid,parse_error,wrapped=settings_payload_valid("return {"..text.."}")
+            if not valid then return nil,parse_error end
+            entry={text=text,value=wrapped[key]}
+        end
+        entries[key]=entry
+        parts[#parts+1]=entry.text
+        parsed[key]=entry.value
+    end
+    return "-- "..tostring(path or "").."\nreturn {"..table.concat(parts).."}\n",parsed,entries
+end
+
 function Store:flush(reason)
     local flush_started=store_perf_clock()
     reason=tostring(reason or "direct")
@@ -2821,12 +2847,21 @@ function Store:flush(reason)
     -- table expression, while a settings file must be a chunk that returns it.
     -- Validate the complete chunk in memory, atomically replace the target, and
     -- keep the last valid generation if anything fails.
-    local payload,validated_data
+    local payload,validated_data,validated_entries
+    local previous_entries=self._validated_settings and self._validated_settings.entries
     local function attempt_write()
-        payload=settings_payload(self.db.data,self.settings_path)
-        local valid_payload,parse_error,parsed=settings_payload_valid(payload)
-        if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
-        validated_data=parsed
+        local built,detail,entries=incremental_settings_payload(
+            self.db.data,self.settings_path,previous_entries)
+        if built then
+            payload,validated_data,validated_entries=built,detail,entries
+        elseif detail then
+            error("serialized settings invalid: "..tostring(detail))
+        else
+            payload=settings_payload(self.db.data,self.settings_path)
+            local valid_payload,parse_error,parsed=settings_payload_valid(payload)
+            if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
+            validated_data,validated_entries=parsed,nil
+        end
         local written,write_error=U.atomic_write(self.settings_path,payload,true)
         if not written then error("atomic settings write failed: "..tostring(write_error)) end
     end
@@ -2877,7 +2912,7 @@ function Store:flush(reason)
         end
         os.remove(previous_path)
     end
-    self._validated_settings={payload=payload,data=validated_data}
+    self._validated_settings={payload=payload,data=validated_data,entries=validated_entries}
     self._pending_home_navigation=nil
     local elapsed_ms=math.floor((store_perf_clock()-flush_started)*1000+0.5)
     if elapsed_ms>=250 or reason=="set:auth" then
