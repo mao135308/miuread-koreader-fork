@@ -22,6 +22,7 @@ write(book_file,'epub')
 local book={book_id='1',variants={notes={file=book_file}},chapters={}}
 local roots={}
 local store={
+    data_dir=TMP,
     book=function(_,id) return id=='1' and book or nil end,
     partial_cache_paths=function() return roots end,
 }
@@ -93,9 +94,27 @@ local function run()
     age(root,10)
     check('complete after repair',0,1)
     check('complete after repair cached',0,0)
+    -- Verdicts survive a restart (module reload) and are reused only while
+    -- the files keep their signature; a damaged verdict file is ignored.
+    os.execute('sleep 2'); check('flush verdicts',0,0)
+    local verdicts=TMP..'/partial-repair-verdicts-v1.json'
+    assert(io.open(verdicts,'rb'),'verdicts were not saved')
+    local function restart()
+        package.loaded['miuread.book_integrity']=nil
+        BookIntegrity=require('miuread.book_integrity')
+    end
+    restart()
+    check('after restart',0,0)
+    restart()
+    write(verdicts,'{damaged')
+    check('damaged verdict file',0,1)
+    os.execute('sleep 2'); check('re-saved',0,0)
+    restart()
+    assert(DownloadDatabase.save_manifest(root,manifest(false)))
+    check('write after restart',1,1)
     os.execute("rm -rf '"..root.."'")
     check('cache removed',0)
-    print('partial repairs: settled verdict reuse, generated file check, new writes, removal'..(Original and ', original parity' or '')..': PASS')
+    print('partial repairs: settled verdict reuse, generated file check, new writes, restart persistence, removal'..(Original and ', original parity' or '')..': PASS')
 end
 
 local ok,err=xpcall(run,debug.traceback)

@@ -3,6 +3,7 @@ local EpubInstaller=require("miuread.epub_installer")
 local DownloadDatabase=require("miuread.download_database")
 local DownloadResult=require("miuread.download_result")
 local U=require("miuread.util")
+local Json=require("miuread.json")
 local lfs=require("libs/libkoreader-lfs")
 
 local M={}
@@ -211,7 +212,46 @@ end
 -- least SETTLED_SECONDS before they were read: any later write then changes an
 -- mtime.
 local SETTLED_SECONDS=3
+local SETTLED_FILE="partial-repair-verdicts-v1.json"
 local settled_partials={}
+local settled_loaded_from=nil
+local settled_dirty,settled_saved_at=false,0
+
+local function settled_path(store)
+    local dir=type(store)=="table" and tostring(store.data_dir or "") or ""
+    return dir~="" and (dir.."/"..SETTLED_FILE) or nil
+end
+
+-- Verdicts survive restarts so the first downloads list after a restart does
+-- not decode every manifest again; each is still used only while its exact
+-- file signature is unchanged. A missing or damaged file is simply ignored.
+local function load_settled(store)
+    local path=settled_path(store)
+    if not path or settled_loaded_from==path then return end
+    settled_loaded_from=path
+    local raw=U.read_file(path,true)
+    if not raw or raw=="" then return end
+    local ok,value=pcall(Json.decode,raw)
+    if not ok or type(value)~="table" or value.version~=1 or type(value.entries)~="table" then return end
+    for root,entry in pairs(value.entries) do
+        if type(root)=="string" and type(entry)=="table" and type(entry.signature)=="string"
+            and settled_partials[root]==nil then
+            settled_partials[root]={signature=entry.signature,option_key=entry.option_key,
+                options=type(entry.options)=="table" and entry.options or nil}
+        end
+    end
+end
+
+local function save_settled(store)
+    if not settled_dirty or os.time()-settled_saved_at<2 then return end
+    local path=settled_path(store)
+    if not path then return end
+    local ok,encoded=pcall(Json.encode,{version=1,entries=settled_partials})
+    if ok and U.atomic_write(path,encoded,true) then
+        settled_dirty=false
+        settled_saved_at=os.time()
+    end
+end
 
 local function partial_signature(root)
     local path=DownloadDatabase.partial_path(root)
@@ -235,13 +275,15 @@ function M.partial_repairs(store,book_id)
     book_id=tostring(book_id or "")
     local book=book_id~="" and store:book(book_id) or nil
     local out={}
+    load_settled(store)
     for _,root in ipairs(store:partial_cache_paths(book_id)) do
         local signature,newest=partial_signature(root)
         local settled=signature and settled_partials[root]
         if settled and (settled.signature~=signature or not has_generated_record(book,settled,settled.options)) then
             settled=nil
         end
-        settled_partials[root]=settled
+        if settled_partials[root] and not settled then settled_dirty=true end
+        settled_partials[root]=settled or nil
         local manifest=not settled and DownloadDatabase.load_manifest(root) or nil
         if type(manifest)=="table" then
             local key=tostring(manifest.option_key or "")
@@ -251,6 +293,7 @@ function M.partial_repairs(store,book_id)
             if not partial_manifest_pending(manifest,has_record) then
                 if signature and os.time()-newest>=SETTLED_SECONDS then
                     settled_partials[root]={signature=signature,option_key=manifest.option_key,options=options}
+                    settled_dirty=true
                 end
             else
                 local complete,failed,total=0,0,0
@@ -269,6 +312,7 @@ function M.partial_repairs(store,book_id)
         end
     end
     table.sort(out,function(a,b) return a.updated_at>b.updated_at end)
+    save_settled(store)
     return out
 end
 
