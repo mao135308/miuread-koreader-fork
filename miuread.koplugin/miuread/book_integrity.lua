@@ -3,6 +3,7 @@ local EpubInstaller=require("miuread.epub_installer")
 local DownloadDatabase=require("miuread.download_database")
 local DownloadResult=require("miuread.download_result")
 local U=require("miuread.util")
+local lfs=require("libs/libkoreader-lfs")
 
 local M={}
 
@@ -200,18 +201,58 @@ local function partial_manifest_pending(manifest, has_record)
     return not has_record
 end
 
+-- partial_repairs() runs for every downloaded book when the downloads list
+-- opens, and decoding each cache manifest (often hundreds of KB of JSON) kept
+-- the UI blocked for seconds. A manifest with nothing left to repair can only
+-- become repairable through a new database write or a missing generated file.
+-- Remember that manifest-only verdict while the database and its WAL keep the
+-- same size and mtime, and still check the generated file on every call. FAT
+-- timestamps are coarse, so a verdict is kept only for files last written at
+-- least SETTLED_SECONDS before they were read: any later write then changes an
+-- mtime.
+local SETTLED_SECONDS=3
+local settled_partials={}
+
+local function partial_signature(root)
+    local path=DownloadDatabase.partial_path(root)
+    local db=lfs.attributes(path)
+    if type(db)~="table" or db.mode~="file" then return nil end
+    -- An empty WAL holds no frames; readers create one, so it is not a change.
+    local wal=lfs.attributes(path.."-wal")
+    local wal_frames=type(wal)=="table" and (tonumber(wal.size) or 0)>0
+    local wal_size=wal_frames and tonumber(wal.size) or -1
+    local wal_time=wal_frames and tonumber(wal.modification) or -1
+    local newest=math.max(tonumber(db.modification) or 0,wal_time)
+    return table.concat({tostring(db.size),tostring(db.modification),tostring(wal_size),tostring(wal_time)},":"),newest
+end
+
+local function has_generated_record(book,manifest,options)
+    local record=partial_record(book,manifest,options)
+    return type(record)=="table" and record.file and U.file_exists(record.file) and true or false
+end
+
 function M.partial_repairs(store,book_id)
     book_id=tostring(book_id or "")
     local book=book_id~="" and store:book(book_id) or nil
     local out={}
     for _,root in ipairs(store:partial_cache_paths(book_id)) do
-        local manifest=DownloadDatabase.load_manifest(root)
+        local signature,newest=partial_signature(root)
+        local settled=signature and settled_partials[root]
+        if settled and (settled.signature~=signature or not has_generated_record(book,settled,settled.options)) then
+            settled=nil
+        end
+        settled_partials[root]=settled
+        local manifest=not settled and DownloadDatabase.load_manifest(root) or nil
         if type(manifest)=="table" then
             local key=tostring(manifest.option_key or "")
             local kind=key:match("^notes%-") and "notes" or "clean"
             local options,option_error=partial_options(manifest)
-            local record=partial_record(book,manifest,options)
-            if partial_manifest_pending(manifest,type(record)=="table" and record.file and U.file_exists(record.file)) then
+            local has_record=has_generated_record(book,manifest,options)
+            if not partial_manifest_pending(manifest,has_record) then
+                if signature and os.time()-newest>=SETTLED_SECONDS then
+                    settled_partials[root]={signature=signature,option_key=manifest.option_key,options=options}
+                end
+            else
                 local complete,failed,total=0,0,0
                 for _,entry in pairs(type(manifest.chapters)=="table" and manifest.chapters or {}) do
                     if type(entry)=="table" then
