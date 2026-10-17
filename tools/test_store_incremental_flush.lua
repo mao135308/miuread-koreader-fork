@@ -92,6 +92,7 @@ local function expect_file(path,data,label)
     local persisted=assert(loadfile(path),label..': settings file does not load')()
     local expected=assert(loadstring('return '..dump(data)))()
     assert(same(persisted,expected),label..': persisted settings differ from memory')
+    assert(read(path..'.miuread-backup')==read(path),label..': backup differs from the settings file')
 end
 
 local function run()
@@ -273,6 +274,15 @@ local function run()
     assert(store:flush('library changed'))
     local second=store:read_persisted_shared('library')
     assert(second~=first and second['300'] and second['300'].title=='new','shared copy survived a file change')
+
+    -- With the backup already equal to the file, a change writes the file and
+    -- the backup only (no duplicate .previous copy).
+    data=store.db.data
+    data.sessions['200'].percent=0.9
+    local writes_before=write_count
+    assert(store:flush('two writes'))
+    assert(write_count==writes_before+2,'changed flush wrote '..(write_count-writes_before)..' files')
+    expect_file(path,data,'two writes')
 
     -- Unchanged data still skips the write entirely.
     local writes=write_count

@@ -2842,7 +2842,12 @@ function Store:flush(reason)
     end
     local previous_path=self.settings_path..".previous"
     if not self.isolated then
-        if disk_data then U.copy_file(self.settings_path,previous_path) end
+        -- When the backup already holds exactly the bytes on disk, a .previous
+        -- copy would only duplicate it; keep it whenever that is not known.
+        local snapshot=self._validated_settings
+        local backup_matches=disk_data~=nil and snapshot~=nil and snapshot.data==disk_data
+            and snapshot.backed_up==true
+        if disk_data and not backup_matches then U.copy_file(self.settings_path,previous_path) end
     end
 
     -- Serialize exactly like KOReader LuaSettings:flush(): dump() emits only a
@@ -2910,7 +2915,8 @@ function Store:flush(reason)
     local backed_up=false
     if not self.isolated then
         local backup_error
-        backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
+        -- The file was just read back and equals payload byte for byte.
+        backed_up,backup_error=U.atomic_write(self.settings_backup_path,payload,true)
         if not backed_up then
             logger.warn("[MiuRead][Store] settings backup refresh failed",tostring(backup_error or "unknown"))
         end
